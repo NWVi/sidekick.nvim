@@ -8,6 +8,7 @@ local M = {}
 M.__index = M
 M.priority = 50
 M.external = false
+M.create = { "terminal" }
 
 M.tpl = [[
 layout {
@@ -57,12 +58,8 @@ end
 
 ---@return sidekick.cli.terminal.Cmd?
 function M:start()
-  if vim.env.ZELLIJ and Config.cli.mux.create ~= "terminal" then
-    Util.warn({
-      ("Zellij does not support `opts.cli.mux.create = %q`."):format(Config.cli.mux.create),
-      ("Falling back to `%q`."):format("terminal"),
-      "Please update your config.",
-    })
+  if vim.env.ZELLIJ then
+    self:create_mode() -- warns about unsupported modes
   end
   -- Zellij's scripting API is too limited, so
   -- always run embedded sessions

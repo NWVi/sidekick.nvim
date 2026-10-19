@@ -8,6 +8,7 @@ M.__index = M
 -- Herdr has no embedded mode, so sessions always live in a herdr pane
 M.external = true
 M.priority = 10
+M.create = { "split", "window" }
 
 ---@param args string[]
 ---@param opts? { notify?:boolean }
@@ -27,16 +28,7 @@ function M:start()
     return
   end
 
-  local create = Config.cli.mux.create
-  if create == "terminal" then
-    Util.warn({
-      ("Herdr does not support `opts.cli.mux.create = %q`."):format(create),
-      ("Falling back to `%q`."):format("split"),
-      "Please update your config.",
-    })
-    create = "split"
-  end
-
+  local create = self:create_mode()
   local pane ---@type table?
   if create == "window" then
     local ret = M.api({ "tab", "create", "--cwd", self.cwd, "--label", self.tool.name, "--no-focus" })
@@ -87,17 +79,12 @@ end
 
 --- Shell command line for the tool, including env overrides
 function M:shell_cmd()
-  local unset, set = {}, {} ---@type string[], string[]
-  for key, value in pairs(self.tool.env or {}) do
-    if value == false then
-      vim.list_extend(unset, { "-u", key })
-    else
-      set[#set + 1] = ("%s=%s"):format(key, tostring(value))
-    end
-  end
+  local unset, set = self:env_overrides()
+  local cmd = (#unset + #set > 0) and { "env" } or {}
   -- `env` options must come before any assignments
-  local cmd = next(self.tool.env or {}) and { "env" } or {}
-  vim.list_extend(cmd, unset)
+  for _, key in ipairs(unset) do
+    vim.list_extend(cmd, { "-u", key })
+  end
   vim.list_extend(cmd, set)
   vim.list_extend(cmd, self.tool.cmd)
   return table.concat(vim.tbl_map(vim.fn.shellescape, cmd), " ")
@@ -173,16 +160,8 @@ function M:pane(verb, ...)
 end
 
 ---Send text to a herdr pane
-function M:send(text)
-  if self.tool.mux_focus then
-    -- Send focus-in event first (some TUI apps like qwen ignore input when unfocused)
-    self:pane("send-text", "\27[I")
-    vim.defer_fn(function()
-      self:pane("send-text", text)
-    end, 50) -- slight delay to ensure focus event is processed first
-  else
-    self:pane("send-text", text)
-  end
+function M:send_text(text)
+  self:pane("send-text", text)
 end
 
 function M:submit()

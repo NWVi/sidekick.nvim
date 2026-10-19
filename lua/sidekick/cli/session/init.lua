@@ -29,11 +29,64 @@ M._attached = {} ---@type table<string,sidekick.cli.Session>
 local B = {}
 B.__index = B
 B.priority = 0
+--- Supported `cli.mux.create` modes. The first one is the fallback.
+B.create = { "terminal", "window", "split" } ---@type ("terminal"|"window"|"split")[]
 
---- Send text to the session
+--- Send text to the session.
+--- Sends a focus-in event first for tools that need it (`mux_focus`)
 ---@param text string
 function B:send(text)
-  error("Backend:send() not implemented")
+  if self.tool.mux_focus then
+    -- some TUI apps like qwen ignore input when unfocused
+    self:send_focus()
+    vim.defer_fn(function()
+      self:send_text(text)
+    end, 50) -- slight delay to ensure focus event is processed first
+  else
+    self:send_text(text)
+  end
+end
+
+--- Send raw text to the session
+---@param text string
+function B:send_text(text)
+  error("Backend:send_text() not implemented")
+end
+
+--- Send a focus-in event to the session
+function B:send_focus()
+  self:send_text("\27[I")
+end
+
+--- The configured `cli.mux.create` mode, or the backend's fallback when unsupported
+---@return "terminal"|"window"|"split"
+function B:create_mode()
+  local mode = Config.cli.mux.create
+  if vim.tbl_contains(self.create, mode) then
+    return mode
+  end
+  Util.warn({
+    ("`%s` does not support `opts.cli.mux.create = %q`."):format(self.backend, mode),
+    ("Falling back to `%q`."):format(self.create[1]),
+    "Please update your config.",
+  })
+  return self.create[1]
+end
+
+--- Environment overrides of the tool, as sorted vars to unset and `KEY=VALUE` assignments
+---@return string[] unset, string[] set
+function B:env_overrides()
+  local unset, set = {}, {} ---@type string[], string[]
+  for key, value in pairs(self.tool.env or {}) do
+    if value == false then
+      unset[#unset + 1] = key
+    else
+      set[#set + 1] = ("%s=%s"):format(key, tostring(value))
+    end
+  end
+  table.sort(unset)
+  table.sort(set)
+  return unset, set
 end
 
 --- Initialize the session backend (optional hook)
@@ -121,14 +174,9 @@ function M.setup()
   end
   M.did_setup = true
   Config.tools() -- load tools, since they may register session backends
-  local session_backends = {
-    tmux = "sidekick.cli.session.tmux",
-    zellij = "sidekick.cli.session.zellij",
-    herdr = "sidekick.cli.session.herdr",
-  }
-  for name, mod in pairs(session_backends) do
-    if vim.fn.executable(name) == 1 then
-      M.register(name, require(mod))
+  for _, mux in ipairs(require("sidekick.cli.session.mux").backends) do
+    if vim.fn.executable(mux.name) == 1 then
+      M.register(mux.name, require(mux.module))
     end
   end
   M.register("terminal", require("sidekick.cli.terminal"))

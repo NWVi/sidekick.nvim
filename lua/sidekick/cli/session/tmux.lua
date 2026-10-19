@@ -72,12 +72,12 @@ end
 
 ---@param ret string[]
 function M:add_cmd(ret)
-  for key, value in pairs(self.tool.env or {}) do
-    if value == false then
-      vim.list_extend(ret, { "-u", key }) -- unset
-    else
-      vim.list_extend(ret, { "-e", ("%s=%s"):format(key, tostring(value)) })
-    end
+  local unset, set = self:env_overrides()
+  for _, key in ipairs(unset) do
+    vim.list_extend(ret, { "-u", key })
+  end
+  for _, kv in ipairs(set) do
+    vim.list_extend(ret, { "-e", kv })
   end
   vim.list_extend(ret, self.tool.cmd)
 end
@@ -165,20 +165,14 @@ function M:pane_id()
 end
 
 ---Send text to a tmux pane
-function M:send(text)
-  local function send()
-    local buffer = "sidekick-" .. self.tmux_pane_id
-    Util.exec({ "tmux", "load-buffer", "-b", buffer, "-" }, { stdin = text })
-    Util.exec({ "tmux", "paste-buffer", "-b", buffer, "-d", "-r", "-t", self.tmux_pane_id })
-  end
+function M:send_text(text)
+  local buffer = "sidekick-" .. self.tmux_pane_id
+  Util.exec({ "tmux", "load-buffer", "-b", buffer, "-" }, { stdin = text })
+  Util.exec({ "tmux", "paste-buffer", "-b", buffer, "-d", "-r", "-t", self.tmux_pane_id })
+end
 
-  if self.tool.mux_focus then
-    -- Send focus-in event first (some TUI apps like qwen ignore input when unfocused)
-    Util.exec({ "tmux", "send-keys", "-t", self.tmux_pane_id, "Escape", "[", "I" })
-    vim.defer_fn(send, 50) -- slight delay to ensure focus event is processed first
-  else
-    send()
-  end
+function M:send_focus()
+  Util.exec({ "tmux", "send-keys", "-t", self.tmux_pane_id, "Escape", "[", "I" })
 end
 
 ---Send text to a tmux pane
