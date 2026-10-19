@@ -2,7 +2,6 @@ local Config = require("sidekick.config")
 local Util = require("sidekick.util")
 
 ---@class sidekick.cli.muxer.Herdr: sidekick.cli.Session
----@field herdr_pane_id string
 ---@field herdr_pid number
 local M = {}
 M.__index = M
@@ -60,10 +59,9 @@ function M:start()
   if not Util.exec({ "herdr", "pane", "run", pane.pane_id, "exec " .. self:shell_cmd() }) then
     return
   end
-  self.herdr_pane_id = pane.pane_id
   self.mux_session = pane.pane_id
   self.started = true
-  local info = M.process_info(pane.pane_id)
+  local info = M.process_info({ pane.pane_id })[pane.pane_id]
   if info then
     self.herdr_pid = info.shell_pid
     self.id = ("herdr %d"):format(info.shell_pid)
@@ -98,17 +96,27 @@ function M:shell_cmd()
     end
   end
   -- `env` options must come before any assignments
-  local cmd = (#unset + #set > 0) and { "env" } or {}
+  local cmd = next(self.tool.env or {}) and { "env" } or {}
   vim.list_extend(cmd, unset)
   vim.list_extend(cmd, set)
   vim.list_extend(cmd, self.tool.cmd)
   return table.concat(vim.tbl_map(vim.fn.shellescape, cmd), " ")
 end
 
----@param pane_id string
-function M.process_info(pane_id)
-  local ret = M.api({ "pane", "process-info", "--pane", pane_id }, { notify = false })
-  return ret and ret.process_info
+--- Fetch process info for the given panes in parallel
+---@param pane_ids string[]
+---@return table<string, {shell_pid?:integer}>
+function M.process_info(pane_ids)
+  local jobs = {} ---@type table<string, vim.SystemObj>
+  for _, id in ipairs(pane_ids) do
+    jobs[id] = vim.system({ "herdr", "pane", "process-info", "--pane", id }, { text = true })
+  end
+  local ret = {} ---@type table<string, {shell_pid?:integer}>
+  for id, job in pairs(jobs) do
+    local ok, data = pcall(vim.json.decode, job:wait().stdout or "")
+    ret[id] = ok and type(data) == "table" and data.result and data.result.process_info or nil
+  end
+  return ret
 end
 
 function M:is_running()
@@ -117,17 +125,25 @@ end
 
 function M.sessions()
   local ret = {} ---@type sidekick.cli.session.State[]
+  -- skip the extra spawns for users who merely have herdr installed
+  if vim.env.HERDR_ENV ~= "1" and Config.cli.mux.backend ~= "herdr" then
+    return ret
+  end
   local list = M.api({ "pane", "list" }, { notify = false })
   if not list then
     return ret
   end
   local tools = Config.tools()
 
+  local panes = list.panes or {} ---@type {pane_id:string, cwd?:string, foreground_cwd?:string}[]
+  local infos = M.process_info(vim.tbl_map(function(p)
+    return p.pane_id
+  end, panes))
+
   local Procs = require("sidekick.cli.procs")
   local procs = Procs.new()
-  for _, pane in ipairs(list.panes or {}) do
-    local info = M.process_info(pane.pane_id)
-    local pid = info and info.shell_pid
+  for _, pane in ipairs(panes) do
+    local pid = infos[pane.pane_id] and infos[pane.pane_id].shell_pid
     if pid then
       procs:walk(pid, function(proc)
         for _, tool in pairs(tools) do
@@ -136,7 +152,6 @@ function M.sessions()
               id = ("herdr %d"):format(pid),
               cwd = proc.cwd or pane.foreground_cwd or pane.cwd,
               tool = tool,
-              herdr_pane_id = pane.pane_id,
               herdr_pid = pid,
               mux_session = pane.pane_id,
               pids = Procs.pids(pid),
@@ -151,41 +166,34 @@ function M.sessions()
   return ret
 end
 
+--- Run `herdr pane <verb> <pane_id> ...` for this session's pane
+---@param verb string
+function M:pane(verb, ...)
+  return Util.exec({ "herdr", "pane", verb, self.mux_session, ... })
+end
+
 ---Send text to a herdr pane
 function M:send(text)
-  local function send()
-    Util.exec({ "herdr", "pane", "send-text", self.herdr_pane_id, text })
-  end
-
   if self.tool.mux_focus then
     -- Send focus-in event first (some TUI apps like qwen ignore input when unfocused)
-    Util.exec({ "herdr", "pane", "send-text", self.herdr_pane_id, "\27[I" })
-    vim.defer_fn(send, 50) -- slight delay to ensure focus event is processed first
+    self:pane("send-text", "\27[I")
+    vim.defer_fn(function()
+      self:pane("send-text", text)
+    end, 50) -- slight delay to ensure focus event is processed first
   else
-    send()
+    self:pane("send-text", text)
   end
 end
 
 function M:submit()
-  Util.exec({ "herdr", "pane", "send-keys", self.herdr_pane_id, "enter" })
+  self:pane("send-keys", "enter")
 end
 
 function M:dump()
-  if not self.herdr_pane_id then
+  if not self.mux_session then
     return
   end
-  local _, ret = Util.exec({
-    "herdr",
-    "pane",
-    "read",
-    self.herdr_pane_id,
-    "--source",
-    "recent",
-    "--lines",
-    tostring(Config.cli.mux.dump),
-    "--format",
-    "ansi",
-  })
+  local _, ret = self:pane("read", "--source", "recent", "--lines", tostring(Config.cli.mux.dump), "--format", "ansi")
   return ret and (ret:gsub("\r\n", "\n")) or nil
 end
 
